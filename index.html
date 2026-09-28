@@ -1548,13 +1548,13 @@ function initPad() {
       v.z = clamp(g.z * (dist / g.dist), 0.15, 8);
       v.ox = g.ox + g.mid[0] / g.z - mid[0] / v.z;
       v.oy = g.oy + g.mid[1] / g.z - mid[1] / v.z;
-      redrawPad(); padZoomLabel(); return;
+      redrawPad(); padZoomLabel(); try { viewTick(); } catch (_) {} return;
     }
     if (inkPad.pan && e.pointerId === inkPad.pan.id) {
       e.preventDefault(); const p = frac(e); const v = padView();
       v.ox = inkPad.pan.ox - (p[0] - inkPad.pan.from[0]) / v.z;
       v.oy = inkPad.pan.oy - (p[1] - inkPad.pan.from[1]) / v.z;
-      redrawPad(); return;
+      redrawPad(); try { viewTick(); } catch (_) {} return;
     }
     if (!inkPad.drawing || e.pointerId !== inkPad.drawing.id) return; e.preventDefault();
     const d = inkPad.drawing; const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
@@ -1563,8 +1563,8 @@ function initPad() {
   };
   const end = e => {
     inkPad.pointers.delete(e.pointerId);
-    if (inkPad.gesture) { if (inkPad.pointers.size < 2) { inkPad.gesture = null; save(); } return; }
-    if (inkPad.pan && e.pointerId === inkPad.pan.id) { inkPad.pan = null; save(); return; }
+    if (inkPad.gesture) { if (inkPad.pointers.size < 2) { inkPad.gesture = null; save(); try { viewTick(); } catch (_) {} } return; }
+    if (inkPad.pan && e.pointerId === inkPad.pan.id) { inkPad.pan = null; save(); try { viewTick(); } catch (_) {} return; }
     if (!inkPad.drawing || e.pointerId !== inkPad.drawing.id) return;
     const d = inkPad.drawing; inkPad.drawing = null; const stroke = d.stroke;
     if (stroke.pts.length === 1) { stroke.pts.push([stroke.pts[0][0] + 0.0005, stroke.pts[0][1]]); if (stroke.pressure) stroke.pressure.push(stroke.pressure[0]); }
@@ -1577,7 +1577,7 @@ function initPad() {
     e.preventDefault(); const v = padView(); const f = frac(e);
     if (e.ctrlKey || e.metaKey) { const z = clamp(v.z * (e.deltaY < 0 ? 1.12 : 1 / 1.12), 0.15, 8); v.ox = v.ox + f[0] / v.z - f[0] / z; v.oy = v.oy + f[1] / v.z - f[1] / z; v.z = z; padZoomLabel(); }
     else { const r = canvas.getBoundingClientRect(); v.ox += (e.deltaX / r.width) / v.z; v.oy += (e.deltaY / r.width) / v.z; }
-    redrawPad(); clearTimeout(inkPad.wheelSave); inkPad.wheelSave = setTimeout(save, 400);
+    redrawPad(); try { viewTick(); } catch (_) {} clearTimeout(inkPad.wheelSave); inkPad.wheelSave = setTimeout(save, 400);
   };
   inkPad.onResize = resize;
   syncMedia();
@@ -1598,7 +1598,7 @@ document.addEventListener('keydown', e => {
 let panKey = false;
 document.addEventListener('keydown', e => { if (e.code === 'Space' && ['whiteboard', 'notes'].includes(state.view) && !/INPUT|TEXTAREA/.test(document.activeElement?.tagName || '')) { panKey = true; e.preventDefault(); } });
 document.addEventListener('keyup', e => { if (e.code === 'Space') panKey = false; });
-function padZoomLabel() { const l = $('#wbZoom'); if (l) l.textContent = Math.round(padView().z * 100) + '%'; }
+function padZoomLabel() { const l = $('#wbZoom'); if (l) l.textContent = Math.round(padView().z * 100) + '%'; try { viewTick(); } catch (_) {} }
 
 /* ---------------- media: pasted images, uploaded images and PDFs ---------------- */
 function pageItems(pg) { return (pg.items ||= []); }
@@ -1752,7 +1752,7 @@ function redrawPad(ctxOverride) {
     syncMedia();
   }
   (inkPad ? inkPad.page() : activePage()).strokes.forEach(s => drawStroke(ctx, s, false));
-  if (!ctxOverride) { try { liveDrawAll(ctx); } catch (_) {} }
+  if (!ctxOverride) { try { liveDrawAll(ctx); } catch (_) {} try { viewTick(); } catch (_) {} }
 }
 
 
@@ -2070,6 +2070,7 @@ function startWatching() {
       const v = d.data(); if (!v || typeof v.json !== 'string') return;
       if (d.id.startsWith('LIVE_')) { liveReceive(v.json); return; }        // in-progress ink, not part of the saved record
       if (d.id.startsWith('PRES_')) { presenceReceive(v.json); return; }     // who is watching, and what they are showing
+      if (d.id.startsWith('VIEW_')) { viewReceive(v.json); return; }         // where on the sheet they are looking
       parts[d.id] = v.json;
     });
     if (!Object.keys(parts).length) { cloudPush(true); return; }
@@ -2140,7 +2141,7 @@ async function cloudPush(force) {
   try {
     const { docs, keep } = buildDocs();
     const changed = docs.filter(([id, json]) => force || pushed.get(id) !== json);
-    const gone = [...pushed.keys()].filter(id => !keep.has(id) && !id.startsWith('LIVE_') && !id.startsWith('PRES_'));
+    const gone = [...pushed.keys()].filter(id => !keep.has(id) && !id.startsWith('LIVE_') && !id.startsWith('PRES_') && !id.startsWith('VIEW_'));
     const ref = id => fsMod.doc(store, 'teachers', cloud.user.uid, 'state', id);
     for (let i = 0; i < changed.length; i += 8) {
       await Promise.all(changed.slice(i, i + 8).map(([id, json]) => fsMod.setDoc(ref(id), { json, at: Date.now() })));
@@ -2253,6 +2254,11 @@ async function presenceSend(force) {
   const { fsMod, store } = fb;
   try { await fsMod.setDoc(fsMod.doc(store, 'teachers', cloud.user.uid, 'state', 'PRES_' + DEVICE_ID), { json: JSON.stringify(body), at: Date.now() }); } catch (_) {}
 }
+function padAspect() {
+  const b = inkPad && inkPad.box; if (!b) return 0.62;
+  const w = b.clientWidth || b.offsetWidth, h = b.clientHeight || b.offsetHeight;
+  return w && h ? +(h / w).toFixed(4) : 0.62;
+}
 function presenceStart() {
   clearInterval(presTimer);
   presTimer = setInterval(() => presenceSend(true), PRESENCE_MS);
@@ -2264,6 +2270,49 @@ function presenceReceive(json) {
   presence.set(v.by, v);
   if (boardMode()) boardFollow(v);
 }
+/* ---------------- the board follows where you are looking ----------------
+   Pan and zoom live in {ox, oy, z}, in the same world units as the ink, so sending those three
+   numbers puts the board on exactly the part of the sheet you are on. Because a board is usually
+   wider or shorter than a tablet, it matches your left edge and your zoom, and shows whatever
+   extra height it has. */
+let viewTimer = 0, viewLast = 0, viewSig = '';
+const VIEW_MS = 140;
+function boardWatching() {
+  const now = Date.now(); let yes = false;
+  presence.forEach(p => { if (p.board && now - p.at < PRESENCE_STALE) yes = true; });
+  return yes;
+}
+function viewTick() {
+  if (boardMode() || viewTimer) return;
+  if (!fb || !cloud.user || db.settings.liveInk === false) return;
+  if (!['notes', 'whiteboard'].includes(state.view) || !boardWatching()) return;
+  const wait = Math.max(0, VIEW_MS - (Date.now() - viewLast));
+  if (wait === 0) viewSend(); else viewTimer = setTimeout(() => { viewTimer = 0; viewSend(); }, wait);
+}
+async function viewSend() {
+  if (!fb || !cloud.user) return;
+  const v = padView(), pg = activePage(); if (!pg) return;
+  const sig = `${state.view}|${pg.id}|${v.ox.toFixed(3)}|${v.oy.toFixed(3)}|${v.z.toFixed(3)}`;
+  if (sig === viewSig) return;
+  viewSig = sig; viewLast = Date.now(); liveBudget().writes++;
+  const { fsMod, store } = fb;
+  const body = { by: DEVICE_ID, at: Date.now(), view: state.view, pageId: pg.id, ox: +v.ox.toFixed(4), oy: +v.oy.toFixed(4), z: +v.z.toFixed(4), ar: padAspect(), full: state.view === 'whiteboard' ? !!state.notes.wbFull : false };
+  try { await fsMod.setDoc(fsMod.doc(store, 'teachers', cloud.user.uid, 'state', 'VIEW_' + DEVICE_ID), { json: JSON.stringify(body), at: Date.now() }); } catch (_) {}
+}
+function viewReceive(json) {
+  if (!boardMode()) return;
+  let v; try { v = JSON.parse(json); } catch (_) { return; }
+  if (!v || v.by === DEVICE_ID || v.view !== state.view) return;
+  const pg = activePage(); if (!pg || String(pg.id) !== String(v.pageId)) return;
+  const pv = padView();
+  const mine = padAspect(), theirs = v.ar || mine;
+  const oy = +(v.oy - ((mine - theirs) / 2) / v.z).toFixed(4);   // split the extra height top and bottom
+  if (pv.ox === v.ox && pv.oy === oy && pv.z === v.z) return;
+  pv.ox = v.ox; pv.oy = oy; pv.z = v.z;
+  if (state.view === 'whiteboard' && !!state.notes.wbFull !== !!v.full) { state.notes.wbFull = !!v.full; render(); return; }
+  if (inkPad && !inkPad.drawing) { redrawPad(); padZoomLabel(); }
+}
+
 /* Board mode: this screen follows whichever device is being taught from. */
 function boardFollow(p) {
   if (p.board) return;                                   // ignore other board screens
@@ -2350,7 +2399,7 @@ function renderDatabase() {
         <button class="btn" data-act="cloudPushNow">Sync now</button>
         <button class="btn" data-act="cloudSignOut">Sign out</button>
         <label class="check" style="margin-top:10px"><input type="checkbox" data-input="liveInk" ${db.settings.liveInk === false ? '' : 'checked'}> Stream ink live, so the board draws along with the pen</label>
-        <label class="check"><input type="checkbox" data-input="boardMode" ${boardMode() ? 'checked' : ''}> <b>Board mode</b> on this screen: follow my tablet and hide the roster, contacts, behavior log and passes</label>
+        <label class="check"><input type="checkbox" data-input="boardMode" ${boardMode() ? 'checked' : ''}> <b>Board mode</b> on this screen: follow my tablet, including pan and zoom, and hide the roster, contacts, behavior log and passes</label>
         <p class="muted" style="font-size:13px;margin:6px 0 0">${watchers() ? `${watchers()} other screen${watchers() === 1 ? '' : 's'} signed in and watching.` : 'No other screen is open right now, so ink is not being streamed.'}</p>`
       : cfg.projectId ? `<p>Not signed in. Your work is saved on this device only.</p>
         <button class="btn primary" data-act="cloudSignIn">Sign in with Google</button>
